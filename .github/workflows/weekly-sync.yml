@@ -28,4 +28,4 @@ jobs:
 
       - name: Run Sync
         run: |
-          python letterboxd_trakt/main.py
+          python -m letterboxd_trakt.main
