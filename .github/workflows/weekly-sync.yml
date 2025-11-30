@@ -23,8 +23,13 @@ jobs:
           pip install -r requirements.txt
 
       - name: Create Config File
+        shell: bash
+        env:
+          CONFIG_CONTENT: ${{ secrets.SYNC_CONFIG }}
         run: |
-          echo "${{ secrets.SYNC_CONFIG }}" > config.yaml
+          echo "$CONFIG_CONTENT" > config.yaml
+          # Verify file was created and has content (prints size in bytes)
+          ls -l config.yaml
 
       - name: Run Sync
         run: |
