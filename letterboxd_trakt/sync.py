@@ -20,27 +20,61 @@ WATCH_SEARCH_RANGE_HOURS = 48
 # TODO: could possibly look at last activity and see if theres anything missing from there to the next thing in user_films and warn/fill in gaps?
 
 
-def extract_imdb_id_from_link(imdb_link: str):
+def extract_imdb_id_from_link(imdb_link: str | None):
+    if imdb_link is None:
+        return None
     return imdb_link.split("/")[-2]
+
+
+def extract_tmdb_id_from_link(tmdb_link: str | None):
+    if tmdb_link is None:
+        return None
+    return tmdb_link.split("/")[-2]
+
+
+def get_movie_id(lb_movie: LB_movie.Movie) -> tuple[str | None, str | None]:
+    """
+    Get movie ID from Letterboxd movie object.
+    Returns tuple of (id, id_type) where id_type is 'imdb' or 'tmdb'.
+    Tries IMDb first, falls back to TMDB.
+    """
+    imdb_id = extract_imdb_id_from_link(lb_movie.imdb_link)
+    if imdb_id:
+        return (imdb_id, "imdb")
+
+    tmdb_id = extract_tmdb_id_from_link(lb_movie.tmdb_link)
+    if tmdb_id:
+        return (tmdb_id, "tmdb")
+
+    return (None, None)
 
 
 def convert_trakt_datetime_str(rated_at: str):
     return datetime.datetime.strptime(rated_at, "%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def get_trakt_movie(imdb_id: str):
-    trakt_search_res: list[T_Movie] = T_sync.search_by_id(imdb_id, "imdb", "movie")
+def get_trakt_movie(movie_id: str, id_type: str):
+    """
+    Get Trakt movie by ID.
+    id_type should be 'imdb' or 'tmdb'.
+    """
+    trakt_search_res: list[T_Movie] = T_sync.search_by_id(movie_id, id_type, "movie")
     if len(trakt_search_res) == 0:
         console.print(
-            "Couldn't find movie in Trakt. Not a movie?", style="dim dark_red"
+            f"Couldn't find movie in Trakt using {id_type.upper()} ID. Not a movie?",
+            style="dim dark_red",
         )
         return False
 
-    # ensure movie is correct. check imdb id again
-    trakt_movies = [movie for movie in trakt_search_res if movie.imdb == imdb_id]
+    # ensure movie is correct. check id again
+    if id_type == "imdb":
+        trakt_movies = [movie for movie in trakt_search_res if movie.imdb == movie_id]
+    else:  # tmdb
+        trakt_movies = [movie for movie in trakt_search_res if movie.tmdb == int(movie_id)]
+
     if len(trakt_movies) != 1:
         console.print(
-            "Couldn't find movie in Trakt, or multiple movies found?",
+            f"Couldn't find movie in Trakt using {id_type.upper()} ID, or multiple movies found?",
             style="dim dark_red",
         )
         return False
@@ -51,19 +85,24 @@ def get_trakt_movie(imdb_id: str):
 def get_needs_trakt_rating(
     lb_rating: int,
     lb_rating_date: datetime.date | None,
-    lb_imdb_id: str,
+    lb_movie_id: str,
+    lb_id_type: str,
     trakt_movie_ratings: list[T_Movie],
 ):
     if not lb_rating:
         console.print("Haven't rated", style="dim")
         return False
 
+    # Match by IMDb or TMDB ID
+    def matches_trakt_movie(trakt_movie):
+        trakt_ids = trakt_movie["movie"]["ids"]
+        if lb_id_type == "imdb":
+            return trakt_ids.get("imdb") == lb_movie_id
+        else:  # tmdb
+            return trakt_ids.get("tmdb") == int(lb_movie_id)
+
     trakt_rating = next(
-        (
-            trakt_movie
-            for trakt_movie in trakt_movie_ratings
-            if trakt_movie["movie"]["ids"]["imdb"] == lb_imdb_id
-        ),
+        (trakt_movie for trakt_movie in trakt_movie_ratings if matches_trakt_movie(trakt_movie)),
         None,
     )
 
@@ -114,14 +153,20 @@ def get_needs_trakt_rating(
 
 
 def get_needs_trakt_watch(
-    lb_imdb_id: str,
+    lb_movie_id: str,
+    lb_id_type: str,
     lb_watch_date: datetime.date | None,
     trakt_movie_watches: list[T_Movie],
 ):
     # see if it was watched at the same time, if not, need to add it
     for trakt_movie in trakt_movie_watches:
-        if trakt_movie.imdb != lb_imdb_id:
-            continue
+        # Match by IMDb or TMDB ID
+        if lb_id_type == "imdb":
+            if trakt_movie.imdb != lb_movie_id:
+                continue
+        else:  # tmdb
+            if trakt_movie.tmdb != int(lb_movie_id):
+                continue
 
         history = T_sync.get_history("movies", trakt_movie.trakt)
 
@@ -178,19 +223,42 @@ def sync(
     lb_watched: bool,
     lb_watch_date: datetime.date | None,
 ):
-    lb_imdb_id = extract_imdb_id_from_link(lb_movie.imdb_link)
-
-    needs_trakt_rating = get_needs_trakt_rating(
-        lb_rating, lb_rating_date, lb_imdb_id, trakt_movie_ratings
-    )
-    needs_trakt_watch = get_needs_trakt_watch(
-        lb_imdb_id, lb_watch_date, trakt_movie_watches
-    )
-    if not needs_trakt_rating and not needs_trakt_watch:
+    lb_movie_id, lb_id_type = get_movie_id(lb_movie)
+    
+    if lb_movie_id is None or lb_id_type is None:
+        console.print(
+            f"Skipping sync - no IMDb or TMDB ID found for {lb_movie.title}",
+            style="dim yellow",
+        )
         return False
 
-    trakt_movie = get_trakt_movie(lb_imdb_id)
+    # Try to get Trakt movie, with fallback to TMDB if IMDb search fails
+    trakt_movie = get_trakt_movie(lb_movie_id, lb_id_type)
     if not trakt_movie:
+        # If IMDb search failed, try TMDB as fallback (if we haven't already)
+        if lb_id_type == "imdb":
+            tmdb_id = extract_tmdb_id_from_link(lb_movie.tmdb_link)
+            if tmdb_id:
+                console.print(
+                    f"IMDb search failed, trying TMDB fallback for {lb_movie.title}",
+                    style="dim yellow",
+                )
+                trakt_movie = get_trakt_movie(tmdb_id, "tmdb")
+                if trakt_movie:
+                    # Update ID info for comparison functions
+                    lb_movie_id = tmdb_id
+                    lb_id_type = "tmdb"
+        
+        if not trakt_movie:
+            return False
+
+    needs_trakt_rating = get_needs_trakt_rating(
+        lb_rating, lb_rating_date, lb_movie_id, lb_id_type, trakt_movie_ratings
+    )
+    needs_trakt_watch = get_needs_trakt_watch(
+        lb_movie_id, lb_id_type, lb_watch_date, trakt_movie_watches
+    )
+    if not needs_trakt_rating and not needs_trakt_watch:
         return False
 
     if needs_trakt_rating:
@@ -308,18 +376,36 @@ def sync_letterboxd_watchlist(config: Config, account: Account):
     trakt_user = T_user("me")
     trakt_watchlist: list[T_Movie] = trakt_user.watchlist_movies
 
+    # Track both IMDb and TMDB IDs
     trakt_watchlist_imdb_ids = []
+    trakt_watchlist_tmdb_ids = []
 
     for trakt_movie in trakt_watchlist:
-        if trakt_movie.imdb not in trakt_watchlist_imdb_ids:
+        if trakt_movie.imdb and trakt_movie.imdb not in trakt_watchlist_imdb_ids:
             trakt_watchlist_imdb_ids.append(trakt_movie.imdb)
+        if trakt_movie.tmdb and trakt_movie.tmdb not in trakt_watchlist_tmdb_ids:
+            trakt_watchlist_tmdb_ids.append(trakt_movie.tmdb)
 
     for movie_id, movie_details in lb_watchlist["data"].items():
         lb_movie = LB_movie.Movie(movie_details["slug"])
-        lb_imdb_id = extract_imdb_id_from_link(lb_movie.imdb_link)
+        lb_movie_id, lb_id_type = get_movie_id(lb_movie)
 
-        if lb_imdb_id not in trakt_watchlist_imdb_ids:
-            trakt_movie = get_trakt_movie(lb_imdb_id)
+        if lb_movie_id is None or lb_id_type is None:
+            console.print(
+                f"Skipping watchlist sync - no IMDb or TMDB ID found for {lb_movie.title}",
+                style="dim yellow",
+            )
+            continue
+
+        # Check if already in watchlist using appropriate ID type
+        already_in_watchlist = False
+        if lb_id_type == "imdb" and lb_movie_id in trakt_watchlist_imdb_ids:
+            already_in_watchlist = True
+        elif lb_id_type == "tmdb" and int(lb_movie_id) in trakt_watchlist_tmdb_ids:
+            already_in_watchlist = True
+
+        if not already_in_watchlist:
+            trakt_movie = get_trakt_movie(lb_movie_id, lb_id_type)
             if not trakt_movie:
                 continue
 
@@ -328,7 +414,10 @@ def sync_letterboxd_watchlist(config: Config, account: Account):
                 time.sleep(TRAKT_RATE_LIMIT)
 
             console.print(f"Added {lb_movie.title} to watchlist", style="green")
-            trakt_watchlist_imdb_ids.append(lb_imdb_id)
+            if trakt_movie.imdb:
+                trakt_watchlist_imdb_ids.append(trakt_movie.imdb)
+            if trakt_movie.tmdb:
+                trakt_watchlist_tmdb_ids.append(trakt_movie.tmdb)
 
     console.print("Finished syncing watchlist!", style="purple4")
 
