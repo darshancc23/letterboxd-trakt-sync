@@ -22,14 +22,27 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Create Config File
+      - name: Create and Place Config File
         shell: bash
         env:
           CONFIG_CONTENT: ${{ secrets.SYNC_CONFIG }}
         run: |
+          # 1. Create the file in the root directory
           echo "$CONFIG_CONTENT" > config.yaml
-          # Verify file was created and has content (prints size in bytes)
-          ls -l config.yaml
+          
+          # 2. Copy it into the inner folder (letterboxd_trakt) just in case
+          cp config.yaml letterboxd_trakt/config.yaml
+          
+          # 3. Create a JSON version in both places too, in case the script prioritizes JSON
+          # (We assume your secret is valid YAML, but renaming it often works if the parser is flexible)
+          cp config.yaml config.json
+          cp config.yaml letterboxd_trakt/config.json
+          
+          # Debug: List all files so we know where they are
+          echo "Listing root files:"
+          ls -l
+          echo "Listing inner files:"
+          ls -l letterboxd_trakt/
 
       - name: Run Sync
         run: |
