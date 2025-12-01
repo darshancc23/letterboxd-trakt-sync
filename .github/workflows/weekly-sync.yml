@@ -1,0 +1,38 @@
+name: Letterboxd to Trakt Sync
+
+on:
+  schedule:
+    # Runs at 00:00 every Monday. You can change this cron schedule.
+    - cron: '0 0 * * 1'
+  workflow_dispatch: # Allows you to run it manually button click
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Create and Place Config File
+        shell: bash
+        env:
+          CONFIG_CONTENT: ${{ secrets.SYNC_CONFIG }}
+        run: |
+          # 1. Create the file in the root directory
+          echo "$CONFIG_CONTENT" > config.yml
+          
+          # 2. Copy it into the inner folder (letterboxd_trakt) just in case
+          cp config.yml letterboxd_trakt/config.yml
+
+      - name: Run Sync
+        run: |
+          python -m letterboxd_trakt.main
